@@ -17,6 +17,7 @@
 package dev.patrickgold.florisboard.ime.keyboard3.extension
 
 import dev.patrickgold.florisboard.ime.core.Subtype
+import dev.patrickgold.florisboard.ime.keyboard3.touch.TouchModelOptions
 import dev.patrickgold.florisboard.ime.nlp.latin.LatinLanguageProvider
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -49,6 +50,10 @@ class DefaultKeyboardTest : FunSpec({
         keyboard shouldNotContain "longPressDefaultKeyId=\"dollar\""
         keyboard shouldNotContain "longPressDefaultKeyId=\"percent\""
         keyboard shouldNotContain "longPressDefaultKeyId=\"amp\""
+    }
+
+    test("letter-key corner hints are off unless the user turns them on") {
+        TouchModelOptions.Default.longPressKeyHintEnabled shouldBe false
     }
 
     test("the fallback subtype is English (US) with the Latin suggestion provider") {
