@@ -529,7 +529,7 @@ class ImeController(
             }
             val edit = completionEdit(state.content, text) ?: return false
             if (edit.rangeStart == edit.rangeEnd) {
-                emitText(text.asK3String())
+                emitText(edit.committedText.asK3String())
                 notifySuggestionAccepted(candidate)
                 return true
             }
@@ -537,6 +537,7 @@ class ImeController(
             val newSurrounding = state.content.surroundingText.copy(
                 textBefore = edit.newTextBefore,
                 textSelected = "",
+                textAfter = edit.newTextAfter,
             )
             // inputContext is what the next keystroke appends to. It must match the committed word
             // or the following letter would rewrite the field from the old partial token.
@@ -550,7 +551,7 @@ class ImeController(
             )
             state.editor.replaceText(
                 range = edit.rangeStart until edit.rangeEnd,
-                text = text,
+                text = edit.committedText,
                 newSelection = newSelection,
                 newComposition = null,
             )
@@ -719,12 +720,16 @@ private class ExpectedContentQueue {
 internal data class CompletionEdit(
     val rangeStart: Int,
     val rangeEnd: Int,
+    val committedText: String,
     val newTextBefore: String,
+    val newTextAfter: String,
     val newCursor: Int,
 )
 
 /**
- * Replaces the word being typed with [replacement]. The range is absolute in the editor.
+ * Replaces the word being typed with [replacement], then leaves the cursor ready for the next word.
+ * A single space is inserted after the word. An existing space after the cursor is reused instead of
+ * doubled, and no space is inserted immediately before punctuation.
  * Returns null when the surrounding-text window cannot represent that range.
  */
 internal fun completionEdit(content: K3Content, replacement: String): CompletionEdit? {
@@ -752,23 +757,60 @@ internal fun completionEdit(content: K3Content, replacement: String): Completion
         if (partial.isNotEmpty() && before.endsWith(partial)) {
             val from = content.selection.min - partial.length
             if (from >= 0) {
-                return CompletionEdit(
-                    rangeStart = from,
-                    rangeEnd = content.selection.min,
-                    newTextBefore = before.dropLast(partial.length) + replacement,
-                    newCursor = from + replacement.length,
+                return buildCompletion(
+                    replaceFrom = from,
+                    replaceTo = content.selection.min,
+                    prefix = before.dropLast(partial.length),
+                    between = "",
+                    replacement = replacement,
+                    textAfter = content.surroundingText.textAfter,
+                    atCaret = true,
                 )
             }
         }
         return null
     }
-    val newTextBefore = before.substring(0, startInWindow) + replacement + before.substring(endInWindow)
+    return buildCompletion(
+        replaceFrom = replaceFrom,
+        replaceTo = replaceTo,
+        prefix = before.substring(0, startInWindow),
+        between = before.substring(endInWindow),
+        replacement = replacement,
+        textAfter = content.surroundingText.textAfter,
+        atCaret = endInWindow == before.length && replaceTo == content.selection.min,
+    )
+}
+
+private fun buildCompletion(
+    replaceFrom: Int,
+    replaceTo: Int,
+    prefix: String,
+    between: String,
+    replacement: String,
+    textAfter: String,
+    atCaret: Boolean,
+): CompletionEdit {
+    val next = if (atCaret) textAfter.firstOrNull() else null
+    val reuseSpace = next != null && next.isSpaceLike()
+    val beforePunctuation = next != null && !reuseSpace && next.isClausePunctuation()
+    val committed = if (atCaret && !reuseSpace && !beforePunctuation) "$replacement " else replacement
+    val carriedSpace = if (reuseSpace) next.toString() else ""
+    val newTextBefore = prefix + committed + carriedSpace + between
     return CompletionEdit(
         rangeStart = replaceFrom,
         rangeEnd = replaceTo,
+        committedText = committed,
         newTextBefore = newTextBefore,
-        newCursor = replaceFrom + replacement.length,
+        newTextAfter = if (reuseSpace) textAfter.drop(1) else textAfter,
+        newCursor = replaceFrom + committed.length + carriedSpace.length + between.length,
     )
+}
+
+private fun Char.isSpaceLike(): Boolean = this == ' ' || this == '\u00A0' || this == '\t'
+
+private fun Char.isClausePunctuation(): Boolean {
+    return this in ".,!?;:)]}" || this == '\'' || this == '"' ||
+        this == '\u2019' || this == '\u201D' || this == '\u2026'
 }
 
 fun K3Content.cursorCapsMode(inputAttributes: InputAttributes): InputAttributes.CapsMode {

@@ -74,7 +74,7 @@ class LatinSuggestionTest : FunSpec({
         typedToken(plain) shouldBe "th"
     }
 
-    test("accepting a suggestion replaces the partial word") {
+    test("accepting a suggestion replaces the partial word and adds one space") {
         val plain = K3Content(
             selection = K3TextRange(6),
             surroundingText = K3SurroundingText(textBefore = "say th"),
@@ -82,8 +82,9 @@ class LatinSuggestionTest : FunSpec({
         val edit = completionEdit(plain, "the")
         edit!!.rangeStart shouldBe 4
         edit.rangeEnd shouldBe 6
-        edit.newTextBefore shouldBe "say the"
-        edit.newCursor shouldBe 7
+        edit.committedText shouldBe "the "
+        edit.newTextBefore shouldBe "say the "
+        edit.newCursor shouldBe 8
 
         val composed = K3Content(
             selection = K3TextRange(10),
@@ -91,10 +92,33 @@ class LatinSuggestionTest : FunSpec({
             surroundingText = K3SurroundingText(textBefore = "th"),
         )
         val composedEdit = completionEdit(composed, "that")
-        composedEdit!!.newTextBefore shouldBe "that"
+        composedEdit!!.committedText shouldBe "that "
+        composedEdit.newTextBefore shouldBe "that "
         composedEdit.rangeStart shouldBe 8
         composedEdit.rangeEnd shouldBe 10
-        composedEdit.newCursor shouldBe 12
+        composedEdit.newCursor shouldBe 13
+    }
+
+    test("an existing space or punctuation is not doubled") {
+        val followedBySpace = K3Content(
+            selection = K3TextRange(2),
+            surroundingText = K3SurroundingText(textBefore = "th", textAfter = " world"),
+        )
+        val spaced = completionEdit(followedBySpace, "the")
+        spaced!!.committedText shouldBe "the"
+        spaced.newTextBefore shouldBe "the "
+        spaced.newTextAfter shouldBe "world"
+        spaced.newCursor shouldBe 4
+
+        val followedByPeriod = K3Content(
+            selection = K3TextRange(2),
+            surroundingText = K3SurroundingText(textBefore = "th", textAfter = "."),
+        )
+        val punctuated = completionEdit(followedByPeriod, "the")
+        punctuated!!.committedText shouldBe "the"
+        punctuated.newTextBefore shouldBe "the"
+        punctuated.newTextAfter shouldBe "."
+        punctuated.newCursor shouldBe 3
     }
 
     test("the bundled English list suggests real words for th") {
