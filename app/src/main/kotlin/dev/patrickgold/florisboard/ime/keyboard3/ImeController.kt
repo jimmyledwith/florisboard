@@ -97,6 +97,8 @@ class ImeController(
     private val breakIterators = BreakIterators()
     private val expectedContentQueue = ExpectedContentQueue()
     private var emitInterceptor = AtomicReference<EmitInterceptor?>(null)
+    /** True only for the space this keyboard just inserted after `.` or `;`. */
+    private var pendingPunctuationAutoSpace = false
 
     val activeTouchModelOptions = combine<Any, TouchModelOptions>(
         prefs.keyboard.numberRow.asFlow(),
@@ -204,6 +206,7 @@ class ImeController(
             ic: WeakReference<InputConnection>,
             info: FlorisEditorInfo,
         ) {
+            pendingPunctuationAutoSpace = false
             val newTouchLayerId: K3LayerId
             val keyVariation: KeyVariation
             when (info.inputAttributes.type) {
@@ -321,9 +324,38 @@ class ImeController(
         }
 
         override fun emitText(value: K3String) {
-            super.emitText(value)
+            val typed = value.normalize(NormalizationForm.NFC).toText()
+            if (pendingPunctuationAutoSpace && shouldRetractPunctuationAutoSpace(typed)) {
+                pendingPunctuationAutoSpace = false
+                super.emitBackspace()
+                super.emitText(value)
+                expectedContentQueue.push(state.content)
+                reevaluateInputShiftState()
+                return
+            }
+            pendingPunctuationAutoSpace = false
+            val decision = punctuationAutoSpace(
+                typed = typed,
+                textBefore = state.content.surroundingText.textBefore,
+                textAfter = state.content.surroundingText.textAfter,
+                enabled = prefs.correction.autoSpacePunctuation.get() && allowsPunctuationAutoSpace(),
+            )
+            pendingPunctuationAutoSpace = decision.insertedSpace
+            val toEmit = if (decision.text == typed) value else decision.text.asK3String()
+            super.emitText(toEmit)
             expectedContentQueue.push(state.content)
             reevaluateInputShiftState()
+        }
+
+        private fun allowsPunctuationAutoSpace(): Boolean {
+            if (state.editor.info.isRawInputEditor) return false
+            return when (state.flags.keyVariation) {
+                KeyVariation.PASSWORD,
+                KeyVariation.EMAIL_ADDRESS,
+                KeyVariation.URI,
+                    -> false
+                else -> true
+            }
         }
 
         override fun emitDescriptor(descriptor: K3Descriptor) {
@@ -426,6 +458,7 @@ class ImeController(
         }
 
         override fun emitBackspace() {
+            pendingPunctuationAutoSpace = false
             super.emitBackspace()
             expectedContentQueue.push(state.content)
         }
@@ -641,6 +674,7 @@ class ImeController(
         }
 
         fun handleFinishInputView() {
+            pendingPunctuationAutoSpace = false
             resetContent()
             state = state.copy(editor = ImeEditor.Disconnected)
             expectedContentQueue.clear()
@@ -807,6 +841,49 @@ private fun buildCompletion(
 }
 
 private fun Char.isSpaceLike(): Boolean = this == ' ' || this == '\u00A0' || this == '\t'
+
+internal data class PunctuationAutoSpace(
+    val text: String,
+    val insertedSpace: Boolean,
+)
+
+/**
+ * After `.` or `;`, commit the mark plus one space. Skips numbers (`3.`), single-letter
+ * abbreviations (`e.`), URLs and email-looking tokens, and a space that is already after the cursor.
+ */
+internal fun punctuationAutoSpace(
+    typed: String,
+    textBefore: String,
+    textAfter: String,
+    enabled: Boolean,
+): PunctuationAutoSpace {
+    if (!enabled || (typed != "." && typed != ";")) {
+        return PunctuationAutoSpace(typed, false)
+    }
+    if (textAfter.firstOrNull()?.isSpaceLike() == true) {
+        return PunctuationAutoSpace(typed, false)
+    }
+    if (!canAutoSpaceBeforePunctuation(textBefore)) {
+        return PunctuationAutoSpace(typed, false)
+    }
+    return PunctuationAutoSpace("$typed ", true)
+}
+
+/** Drop the automatic space when the next key is a digit, more punctuation, or another space. */
+internal fun shouldRetractPunctuationAutoSpace(nextTyped: String): Boolean {
+    val ch = nextTyped.singleOrNull() ?: return false
+    return !ch.isLetter()
+}
+
+private fun canAutoSpaceBeforePunctuation(textBefore: String): Boolean {
+    val previous = textBefore.lastOrNull() ?: return false
+    if (!previous.isLetter()) return false
+    val token = textBefore.takeLastWhile { !it.isWhitespace() }
+    if (token.length <= 1) return false
+    if ('@' in token || "://" in token) return false
+    if (token.equals("www", ignoreCase = true) || token.startsWith("www.", ignoreCase = true)) return false
+    return true
+}
 
 private fun Char.isClausePunctuation(): Boolean {
     return this in ".,!?;:)]}" || this == '\'' || this == '"' ||
