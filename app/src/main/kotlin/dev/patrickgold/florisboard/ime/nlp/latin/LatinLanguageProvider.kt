@@ -23,6 +23,7 @@ import dev.patrickgold.florisboard.ime.nlp.SpellingProvider
 import dev.patrickgold.florisboard.ime.nlp.SpellingResult
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
 import dev.patrickgold.florisboard.ime.nlp.SuggestionProvider
+import dev.patrickgold.florisboard.ime.nlp.WordSuggestionCandidate
 import dev.patrickgold.florisboard.lib.devtools.flogDebug
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,6 +33,7 @@ import kotlinx.serialization.json.Json
 import org.florisboard.lib.android.readText
 import org.florisboard.lib.kotlin.guardedByLock
 import org.k3lp.runtime.K3Content
+import java.util.Locale
 
 class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProvider {
     companion object {
@@ -105,21 +107,20 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         allowPossiblyOffensive: Boolean,
         isPrivateSession: Boolean,
     ): List<SuggestionCandidate> {
-        return emptyList()
-        /*val word = content.composingText.ifBlank { "next" }
-        val suggestions = buildList {
-            for (n in 0 until maxCandidateCount) {
-                add(WordSuggestionCandidate(
-                    text = "$word$n",
-                    secondaryText = if (n % 2 == 1) "secondary" else null,
-                    confidence = 0.5,
-                    isEligibleForAutoCommit = false,//n == 0 && word.startsWith("auto"),
-                    // We set ourselves as the source provider so we can get notify events for our candidate
-                    sourceProvider = this@LatinLanguageProvider,
-                ))
+        // The word list is static, so a private session still gets suggestions. Nothing here is learned from input.
+        preload(subtype)
+        val typed = typedToken(content)
+        if (typed.isEmpty() || maxCandidateCount <= 0) return emptyList()
+        return wordData.withLock { words ->
+            suggestionsForPrefix(words, typed, maxCandidateCount).map { ranked ->
+                WordSuggestionCandidate(
+                    text = ranked.text,
+                    confidence = ranked.confidence,
+                    isEligibleForAutoCommit = false,
+                    sourceProvider = this,
+                )
             }
         }
-        return suggestions*/
     }
 
     override suspend fun notifySuggestionAccepted(subtype: Subtype, candidate: SuggestionCandidate) {
@@ -147,5 +148,68 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
     override suspend fun destroy() {
         // Here we have the chance to de-allocate memory and finish our work. However this might never be called if
         // the app process is killed (which will most likely always be the case).
+    }
+}
+
+internal data class RankedWord(
+    val text: String,
+    val confidence: Double,
+)
+
+/**
+ * The token the user is currently typing. [K3Content.compositionText] is only set when the field
+ * allows composing (it needs auto-correct). Otherwise the word is the letter run at the end of
+ * the text before the cursor.
+ */
+internal fun typedToken(content: K3Content): String {
+    val composed = content.compositionText
+    if (!composed.isNullOrEmpty()) return composed
+    return trailingWord(content.surroundingText.textBefore)
+}
+
+internal fun trailingWord(textBefore: String): String {
+    var start = textBefore.length
+    while (start > 0 && textBefore[start - 1].isWordChar()) {
+        start--
+    }
+    return textBefore.substring(start)
+}
+
+private fun Char.isWordChar(): Boolean = isLetter() || this == '\'' || this == '\u2019'
+
+/**
+ * Prefix matches from [words] (lowercase dictionary word to frequency 0..255), highest frequency first.
+ * [typed] keeps the user's capitalization. An empty token returns nothing, so an empty field does not
+ * dump the most common words.
+ */
+internal fun suggestionsForPrefix(
+    words: Map<String, Int>,
+    typed: String,
+    maxCandidateCount: Int,
+): List<RankedWord> {
+    if (maxCandidateCount <= 0) return emptyList()
+    val prefix = typed.lowercase(Locale.ROOT)
+    if (prefix.isEmpty() || prefix.any { !it.isWordChar() }) return emptyList()
+    return words.asSequence()
+        .filter { (word, _) -> word.startsWith(prefix) }
+        .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+        .take(maxCandidateCount)
+        .map { (word, frequency) ->
+            RankedWord(
+                text = applyTypedCase(typed, word),
+                confidence = frequency / 255.0,
+            )
+        }
+        .toList()
+}
+
+internal fun applyTypedCase(typed: String, word: String): String {
+    val letters = typed.filter { it.isLetter() }
+    return when {
+        letters.length >= 2 && letters.all { it.isUpperCase() } -> word.uppercase(Locale.ROOT)
+        typed.firstOrNull()?.isUpperCase() == true -> word.replaceFirstChar { char ->
+            if (char.isLowerCase()) char.titlecase(Locale.ROOT) else char.toString()
+        }
+        else -> word
     }
 }

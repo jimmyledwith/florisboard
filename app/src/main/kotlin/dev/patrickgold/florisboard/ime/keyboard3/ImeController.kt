@@ -22,6 +22,7 @@ import android.text.TextUtils
 import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
 import androidx.compose.runtime.staticCompositionLocalOf
+import dev.patrickgold.florisboard.FlorisApplication
 import dev.patrickgold.florisboard.FlorisImeService
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.ImeUiMode
@@ -45,6 +46,7 @@ import dev.patrickgold.florisboard.ime.media.emoji.EmojiSuggestionType
 import dev.patrickgold.florisboard.ime.nlp.BreakIterators
 import dev.patrickgold.florisboard.ime.nlp.ClipboardSuggestionCandidate
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
+import dev.patrickgold.florisboard.ime.nlp.latin.trailingWord
 import dev.patrickgold.florisboard.ime.text.key.KeyVariation
 import dev.patrickgold.florisboard.lib.FlorisLocale
 import dev.patrickgold.florisboard.lib.devtools.flogDebug
@@ -62,6 +64,8 @@ import org.k3lp.lib.text.K3Descriptor
 import org.k3lp.lib.text.K3String
 import org.k3lp.lib.text.K3StringOrDescriptor
 import org.k3lp.lib.text.asK3String
+import org.k3lp.lib.text.normalize
+import org.k3lp.lib.text.unicode.NormalizationForm
 import org.k3lp.model.K3Model
 import org.k3lp.model.layer.K3LayerId
 import org.k3lp.runtime.K3Content
@@ -517,23 +521,43 @@ class ImeController(
         fun emitCompletion(candidate: SuggestionCandidate): Boolean {
             val text = candidate.text.toString()
             if (text.isEmpty() || state.editor.info.isRawInputEditor) return false
-//            val content = activeContent
-//            return if (content.composing.isValid) {
-//                phantomSpace.setActive(showComposingRegion = false, candidate = candidate)
-//                super.finalizeComposingText(text)
-//            } else {
-//                val isPhantomSpaceActive = phantomSpace.determine(text)
-//                phantomSpace.setActive(showComposingRegion = false, candidate = candidate)
-//                return if (isPhantomSpaceActive) {
-//                    super.commitText("$SPACE$text")
-//                } else {
-//                    super.commitText(text)
-//                }.also {
-//                    // handled in finalizeComposingText if content.composing.isValid
-//                    updateLastCommitPosition()
-//                }
-//            }
-            return false
+            if (state.flags.keyVariation == KeyVariation.PASSWORD) return false
+            if (!state.content.selection.isCollapsed()) {
+                emitText(text.asK3String())
+                notifySuggestionAccepted(candidate)
+                return true
+            }
+            val edit = completionEdit(state.content, text) ?: return false
+            if (edit.rangeStart == edit.rangeEnd) {
+                emitText(text.asK3String())
+                notifySuggestionAccepted(candidate)
+                return true
+            }
+            val newSelection = K3TextRange(edit.newCursor)
+            val newSurrounding = state.content.surroundingText.copy(
+                textBefore = edit.newTextBefore,
+                textSelected = "",
+            )
+            // inputContext is what the next keystroke appends to. It must match the committed word
+            // or the following letter would rewrite the field from the old partial token.
+            state = state.copy(
+                content = state.content.copy(
+                    selection = newSelection,
+                    composition = null,
+                    surroundingText = newSurrounding,
+                    inputContext = edit.newTextBefore.asK3String().normalize(NormalizationForm.NFD),
+                ),
+            )
+            state.editor.replaceText(
+                range = edit.rangeStart until edit.rangeEnd,
+                text = text,
+                newSelection = newSelection,
+                newComposition = null,
+            )
+            expectedContentQueue.push(state.content)
+            reevaluateInputShiftState()
+            notifySuggestionAccepted(candidate)
+            return true
         }
 
         override fun switchTouchLayer(newTouchLayerId: K3LayerId) {
@@ -605,6 +629,14 @@ class ImeController(
         override fun resetContent() {
             super.resetContent()
             reevaluateInputShiftState()
+        }
+
+        private fun notifySuggestionAccepted(candidate: SuggestionCandidate) {
+            val provider = candidate.sourceProvider ?: return
+            val subtype = FlorisApplication.getHack().subtypeManager.value.activeSubtype
+            scope.launch {
+                provider.notifySuggestionAccepted(subtype, candidate)
+            }
         }
 
         fun handleFinishInputView() {
@@ -682,6 +714,61 @@ private class ExpectedContentQueue {
     fun clear() {
         list.clear()
     }
+}
+
+internal data class CompletionEdit(
+    val rangeStart: Int,
+    val rangeEnd: Int,
+    val newTextBefore: String,
+    val newCursor: Int,
+)
+
+/**
+ * Replaces the word being typed with [replacement]. The range is absolute in the editor.
+ * Returns null when the surrounding-text window cannot represent that range.
+ */
+internal fun completionEdit(content: K3Content, replacement: String): CompletionEdit? {
+    if (replacement.isEmpty() || !content.selection.isCollapsed()) return null
+    val composed = content.compositionText?.takeIf { it.isNotEmpty() }
+    val composition = content.composition
+    val partial = composed ?: trailingWord(content.surroundingText.textBefore)
+    val replaceFrom: Int
+    val replaceTo: Int
+    if (composed != null && composition != null) {
+        replaceFrom = composition.min
+        replaceTo = composition.max
+    } else if (partial.isNotEmpty()) {
+        replaceFrom = content.selection.min - partial.length
+        replaceTo = content.selection.min
+    } else {
+        replaceFrom = content.selection.min
+        replaceTo = content.selection.min
+    }
+    if (replaceFrom < 0 || replaceTo < replaceFrom) return null
+    val before = content.surroundingText.textBefore
+    val startInWindow = replaceFrom - content.offset
+    val endInWindow = replaceTo - content.offset
+    if (startInWindow !in 0..before.length || endInWindow !in startInWindow..before.length) {
+        if (partial.isNotEmpty() && before.endsWith(partial)) {
+            val from = content.selection.min - partial.length
+            if (from >= 0) {
+                return CompletionEdit(
+                    rangeStart = from,
+                    rangeEnd = content.selection.min,
+                    newTextBefore = before.dropLast(partial.length) + replacement,
+                    newCursor = from + replacement.length,
+                )
+            }
+        }
+        return null
+    }
+    val newTextBefore = before.substring(0, startInWindow) + replacement + before.substring(endInWindow)
+    return CompletionEdit(
+        rangeStart = replaceFrom,
+        rangeEnd = replaceTo,
+        newTextBefore = newTextBefore,
+        newCursor = replaceFrom + replacement.length,
+    )
 }
 
 fun K3Content.cursorCapsMode(inputAttributes: InputAttributes): InputAttributes.CapsMode {

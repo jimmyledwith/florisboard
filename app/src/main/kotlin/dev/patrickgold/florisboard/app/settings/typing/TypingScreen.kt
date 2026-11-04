@@ -82,11 +82,11 @@ fun TypingScreen() {
                 )
             }
 
-            // This card is temporary and is therefore not using a string resource (not so temporary as we thought...)
+            // Spell checking is still a stub. Word suggestions are implemented for normal text fields.
             FlorisErrorCard(
                 modifier = Modifier.padding(top = 32.dp),
                 text = """
-                Suggestions (except system autofill) and spell checking are not available in this release.
+                Spell checking is not available in this release. Word suggestions work in normal text fields.
             """.trimIndent().replace('\n', ' '),
             )
 
