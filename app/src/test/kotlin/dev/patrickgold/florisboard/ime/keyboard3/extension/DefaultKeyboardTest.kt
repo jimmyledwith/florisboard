@@ -36,6 +36,19 @@ class DefaultKeyboardTest : FunSpec({
         keyboard shouldContain "<row keys=\"base-to-shift z x c v b n m bksp\" />"
         keyboard shouldNotContain "<row keys=\"q w e r t z u i o p\" />"
         keyboard shouldNotContain "<row keys=\"base-to-shift y x c v b n m bksp\" />"
+        // Corner hints follow FlorisBoard's English popup list, not the German umlaut/symbol set.
+        keyboard shouldContain "longPressDefaultKeyId=\"a-ash\""
+        keyboard shouldContain "longPressDefaultKeyId=\"e-charon\""
+        keyboard shouldContain "longPressDefaultKeyId=\"i-grave\""
+        keyboard shouldContain "longPressDefaultKeyId=\"o-tilde\""
+        keyboard shouldContain "longPressDefaultKeyId=\"u-acute\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"a-umlaut\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"o-umlaut\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"u-umlaut\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"hash\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"dollar\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"percent\""
+        keyboard shouldNotContain "longPressDefaultKeyId=\"amp\""
     }
 
     test("the fallback subtype is English (US) with the Latin suggestion provider") {
