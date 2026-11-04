@@ -22,6 +22,7 @@ import android.text.TextUtils
 import android.view.KeyEvent
 import android.view.inputmethod.InputConnection
 import androidx.compose.runtime.staticCompositionLocalOf
+import dev.patrickgold.florisboard.FlorisApplication
 import dev.patrickgold.florisboard.FlorisImeService
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.ime.ImeUiMode
@@ -45,6 +46,7 @@ import dev.patrickgold.florisboard.ime.media.emoji.EmojiSuggestionType
 import dev.patrickgold.florisboard.ime.nlp.BreakIterators
 import dev.patrickgold.florisboard.ime.nlp.ClipboardSuggestionCandidate
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
+import dev.patrickgold.florisboard.ime.nlp.latin.trailingWord
 import dev.patrickgold.florisboard.ime.text.key.KeyVariation
 import dev.patrickgold.florisboard.lib.FlorisLocale
 import dev.patrickgold.florisboard.lib.devtools.flogDebug
@@ -62,6 +64,8 @@ import org.k3lp.lib.text.K3Descriptor
 import org.k3lp.lib.text.K3String
 import org.k3lp.lib.text.K3StringOrDescriptor
 import org.k3lp.lib.text.asK3String
+import org.k3lp.lib.text.normalize
+import org.k3lp.lib.text.unicode.NormalizationForm
 import org.k3lp.model.K3Model
 import org.k3lp.model.layer.K3LayerId
 import org.k3lp.runtime.K3Content
@@ -93,6 +97,8 @@ class ImeController(
     private val breakIterators = BreakIterators()
     private val expectedContentQueue = ExpectedContentQueue()
     private var emitInterceptor = AtomicReference<EmitInterceptor?>(null)
+    /** True only for the space this keyboard just inserted after `.` or `;`. */
+    private var pendingPunctuationAutoSpace = false
 
     val activeTouchModelOptions = combine<Any, TouchModelOptions>(
         prefs.keyboard.numberRow.asFlow(),
@@ -200,6 +206,7 @@ class ImeController(
             ic: WeakReference<InputConnection>,
             info: FlorisEditorInfo,
         ) {
+            pendingPunctuationAutoSpace = false
             val newTouchLayerId: K3LayerId
             val keyVariation: KeyVariation
             when (info.inputAttributes.type) {
@@ -317,9 +324,38 @@ class ImeController(
         }
 
         override fun emitText(value: K3String) {
-            super.emitText(value)
+            val typed = value.normalize(NormalizationForm.NFC).toText()
+            if (pendingPunctuationAutoSpace && shouldRetractPunctuationAutoSpace(typed)) {
+                pendingPunctuationAutoSpace = false
+                super.emitBackspace()
+                super.emitText(value)
+                expectedContentQueue.push(state.content)
+                reevaluateInputShiftState()
+                return
+            }
+            pendingPunctuationAutoSpace = false
+            val decision = punctuationAutoSpace(
+                typed = typed,
+                textBefore = state.content.surroundingText.textBefore,
+                textAfter = state.content.surroundingText.textAfter,
+                enabled = prefs.correction.autoSpacePunctuation.get() && allowsPunctuationAutoSpace(),
+            )
+            pendingPunctuationAutoSpace = decision.insertedSpace
+            val toEmit = if (decision.text == typed) value else decision.text.asK3String()
+            super.emitText(toEmit)
             expectedContentQueue.push(state.content)
             reevaluateInputShiftState()
+        }
+
+        private fun allowsPunctuationAutoSpace(): Boolean {
+            if (state.editor.info.isRawInputEditor) return false
+            return when (state.flags.keyVariation) {
+                KeyVariation.PASSWORD,
+                KeyVariation.EMAIL_ADDRESS,
+                KeyVariation.URI,
+                    -> false
+                else -> true
+            }
         }
 
         override fun emitDescriptor(descriptor: K3Descriptor) {
@@ -422,6 +458,7 @@ class ImeController(
         }
 
         override fun emitBackspace() {
+            pendingPunctuationAutoSpace = false
             super.emitBackspace()
             expectedContentQueue.push(state.content)
         }
@@ -517,23 +554,44 @@ class ImeController(
         fun emitCompletion(candidate: SuggestionCandidate): Boolean {
             val text = candidate.text.toString()
             if (text.isEmpty() || state.editor.info.isRawInputEditor) return false
-//            val content = activeContent
-//            return if (content.composing.isValid) {
-//                phantomSpace.setActive(showComposingRegion = false, candidate = candidate)
-//                super.finalizeComposingText(text)
-//            } else {
-//                val isPhantomSpaceActive = phantomSpace.determine(text)
-//                phantomSpace.setActive(showComposingRegion = false, candidate = candidate)
-//                return if (isPhantomSpaceActive) {
-//                    super.commitText("$SPACE$text")
-//                } else {
-//                    super.commitText(text)
-//                }.also {
-//                    // handled in finalizeComposingText if content.composing.isValid
-//                    updateLastCommitPosition()
-//                }
-//            }
-            return false
+            if (state.flags.keyVariation == KeyVariation.PASSWORD) return false
+            if (!state.content.selection.isCollapsed()) {
+                emitText(text.asK3String())
+                notifySuggestionAccepted(candidate)
+                return true
+            }
+            val edit = completionEdit(state.content, text) ?: return false
+            if (edit.rangeStart == edit.rangeEnd) {
+                emitText(edit.committedText.asK3String())
+                notifySuggestionAccepted(candidate)
+                return true
+            }
+            val newSelection = K3TextRange(edit.newCursor)
+            val newSurrounding = state.content.surroundingText.copy(
+                textBefore = edit.newTextBefore,
+                textSelected = "",
+                textAfter = edit.newTextAfter,
+            )
+            // inputContext is what the next keystroke appends to. It must match the committed word
+            // or the following letter would rewrite the field from the old partial token.
+            state = state.copy(
+                content = state.content.copy(
+                    selection = newSelection,
+                    composition = null,
+                    surroundingText = newSurrounding,
+                    inputContext = edit.newTextBefore.asK3String().normalize(NormalizationForm.NFD),
+                ),
+            )
+            state.editor.replaceText(
+                range = edit.rangeStart until edit.rangeEnd,
+                text = edit.committedText,
+                newSelection = newSelection,
+                newComposition = null,
+            )
+            expectedContentQueue.push(state.content)
+            reevaluateInputShiftState()
+            notifySuggestionAccepted(candidate)
+            return true
         }
 
         override fun switchTouchLayer(newTouchLayerId: K3LayerId) {
@@ -607,7 +665,16 @@ class ImeController(
             reevaluateInputShiftState()
         }
 
+        private fun notifySuggestionAccepted(candidate: SuggestionCandidate) {
+            val provider = candidate.sourceProvider ?: return
+            val subtype = FlorisApplication.getHack().subtypeManager.value.activeSubtype
+            scope.launch {
+                provider.notifySuggestionAccepted(subtype, candidate)
+            }
+        }
+
         fun handleFinishInputView() {
+            pendingPunctuationAutoSpace = false
             resetContent()
             state = state.copy(editor = ImeEditor.Disconnected)
             expectedContentQueue.clear()
@@ -682,6 +749,145 @@ private class ExpectedContentQueue {
     fun clear() {
         list.clear()
     }
+}
+
+internal data class CompletionEdit(
+    val rangeStart: Int,
+    val rangeEnd: Int,
+    val committedText: String,
+    val newTextBefore: String,
+    val newTextAfter: String,
+    val newCursor: Int,
+)
+
+/**
+ * Replaces the word being typed with [replacement], then leaves the cursor ready for the next word.
+ * A single space is inserted after the word. An existing space after the cursor is reused instead of
+ * doubled, and no space is inserted immediately before punctuation.
+ * Returns null when the surrounding-text window cannot represent that range.
+ */
+internal fun completionEdit(content: K3Content, replacement: String): CompletionEdit? {
+    if (replacement.isEmpty() || !content.selection.isCollapsed()) return null
+    val composed = content.compositionText?.takeIf { it.isNotEmpty() }
+    val composition = content.composition
+    val partial = composed ?: trailingWord(content.surroundingText.textBefore)
+    val replaceFrom: Int
+    val replaceTo: Int
+    if (composed != null && composition != null) {
+        replaceFrom = composition.min
+        replaceTo = composition.max
+    } else if (partial.isNotEmpty()) {
+        replaceFrom = content.selection.min - partial.length
+        replaceTo = content.selection.min
+    } else {
+        replaceFrom = content.selection.min
+        replaceTo = content.selection.min
+    }
+    if (replaceFrom < 0 || replaceTo < replaceFrom) return null
+    val before = content.surroundingText.textBefore
+    val startInWindow = replaceFrom - content.offset
+    val endInWindow = replaceTo - content.offset
+    if (startInWindow !in 0..before.length || endInWindow !in startInWindow..before.length) {
+        if (partial.isNotEmpty() && before.endsWith(partial)) {
+            val from = content.selection.min - partial.length
+            if (from >= 0) {
+                return buildCompletion(
+                    replaceFrom = from,
+                    replaceTo = content.selection.min,
+                    prefix = before.dropLast(partial.length),
+                    between = "",
+                    replacement = replacement,
+                    textAfter = content.surroundingText.textAfter,
+                    atCaret = true,
+                )
+            }
+        }
+        return null
+    }
+    return buildCompletion(
+        replaceFrom = replaceFrom,
+        replaceTo = replaceTo,
+        prefix = before.substring(0, startInWindow),
+        between = before.substring(endInWindow),
+        replacement = replacement,
+        textAfter = content.surroundingText.textAfter,
+        atCaret = endInWindow == before.length && replaceTo == content.selection.min,
+    )
+}
+
+private fun buildCompletion(
+    replaceFrom: Int,
+    replaceTo: Int,
+    prefix: String,
+    between: String,
+    replacement: String,
+    textAfter: String,
+    atCaret: Boolean,
+): CompletionEdit {
+    val next = if (atCaret) textAfter.firstOrNull() else null
+    val reuseSpace = next != null && next.isSpaceLike()
+    val beforePunctuation = next != null && !reuseSpace && next.isClausePunctuation()
+    val committed = if (atCaret && !reuseSpace && !beforePunctuation) "$replacement " else replacement
+    val carriedSpace = if (reuseSpace) next.toString() else ""
+    val newTextBefore = prefix + committed + carriedSpace + between
+    return CompletionEdit(
+        rangeStart = replaceFrom,
+        rangeEnd = replaceTo,
+        committedText = committed,
+        newTextBefore = newTextBefore,
+        newTextAfter = if (reuseSpace) textAfter.drop(1) else textAfter,
+        newCursor = replaceFrom + committed.length + carriedSpace.length + between.length,
+    )
+}
+
+private fun Char.isSpaceLike(): Boolean = this == ' ' || this == '\u00A0' || this == '\t'
+
+internal data class PunctuationAutoSpace(
+    val text: String,
+    val insertedSpace: Boolean,
+)
+
+/**
+ * After `.` or `;`, commit the mark plus one space. Skips numbers (`3.`), single-letter
+ * abbreviations (`e.`), URLs and email-looking tokens, and a space that is already after the cursor.
+ */
+internal fun punctuationAutoSpace(
+    typed: String,
+    textBefore: String,
+    textAfter: String,
+    enabled: Boolean,
+): PunctuationAutoSpace {
+    if (!enabled || (typed != "." && typed != ";")) {
+        return PunctuationAutoSpace(typed, false)
+    }
+    if (textAfter.firstOrNull()?.isSpaceLike() == true) {
+        return PunctuationAutoSpace(typed, false)
+    }
+    if (!canAutoSpaceBeforePunctuation(textBefore)) {
+        return PunctuationAutoSpace(typed, false)
+    }
+    return PunctuationAutoSpace("$typed ", true)
+}
+
+/** Drop the automatic space when the next key is a digit, more punctuation, or another space. */
+internal fun shouldRetractPunctuationAutoSpace(nextTyped: String): Boolean {
+    val ch = nextTyped.singleOrNull() ?: return false
+    return !ch.isLetter()
+}
+
+private fun canAutoSpaceBeforePunctuation(textBefore: String): Boolean {
+    val previous = textBefore.lastOrNull() ?: return false
+    if (!previous.isLetter()) return false
+    val token = textBefore.takeLastWhile { !it.isWhitespace() }
+    if (token.length <= 1) return false
+    if ('@' in token || "://" in token) return false
+    if (token.equals("www", ignoreCase = true) || token.startsWith("www.", ignoreCase = true)) return false
+    return true
+}
+
+private fun Char.isClausePunctuation(): Boolean {
+    return this in ".,!?;:)]}" || this == '\'' || this == '"' ||
+        this == '\u2019' || this == '\u201D' || this == '\u2026'
 }
 
 fun K3Content.cursorCapsMode(inputAttributes: InputAttributes): InputAttributes.CapsMode {

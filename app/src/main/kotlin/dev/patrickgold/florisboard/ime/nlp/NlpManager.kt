@@ -24,8 +24,10 @@ import dev.patrickgold.florisboard.clipboardManager
 import dev.patrickgold.florisboard.ime.clipboard.provider.ClipboardItem
 import dev.patrickgold.florisboard.ime.clipboard.provider.ItemType
 import dev.patrickgold.florisboard.ime.core.Subtype
+import dev.patrickgold.florisboard.ime.keyboard3.ImeEditor
 import dev.patrickgold.florisboard.ime.media.emoji.EmojiSuggestionProvider
 import dev.patrickgold.florisboard.ime.nlp.latin.LatinLanguageProvider
+import dev.patrickgold.florisboard.ime.text.key.KeyVariation
 import dev.patrickgold.florisboard.inferFlorisApplication
 import dev.patrickgold.florisboard.lib.util.NetworkUtils
 import dev.patrickgold.florisboard.subtypeManager
@@ -39,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.florisboard.lib.kotlin.collectIn
 import org.florisboard.lib.kotlin.guardedByLock
 import org.florisboard.lib.kotlin.collectLatestIn
 import org.k3lp.runtime.K3Content
@@ -90,7 +93,23 @@ class NlpManager(context: Context) {
             assembleCandidates()
         }
         prefs.suggestion.enabled.asFlow().collectLatestIn(scope) {
-            assembleCandidates()
+            // Rebuild so the word-suggestion toggle takes effect immediately.
+            suggest(subtypeManager.activeSubtype, imeController.snapshotState().content)
+        }
+        var trackedEditor: ImeEditor? = null
+        var trackedContent: K3Content? = null
+        imeController.activeState.collectIn(scope) { state ->
+            val editorChanged = trackedEditor !== state.editor
+            val contentChanged = trackedContent !== state.content
+            trackedEditor = state.editor
+            trackedContent = state.content
+            if (editorChanged || contentChanged) {
+                // A new field must not keep the previous field's candidates.
+                if (editorChanged) {
+                    clearSuggestions()
+                }
+                suggest(subtypeManager.activeSubtype, state.content)
+            }
         }
         prefs.clipboard.suggestionEnabled.asFlow().collectLatestIn(scope) {
             assembleCandidates()
@@ -192,7 +211,14 @@ class NlpManager(context: Context) {
             || providerForcesSuggestionOn(subtypeManager.activeSubtype)
 
     fun suggest(subtype: Subtype, content: K3Content) {
+        val state = imeController.snapshotState()
+        // Password text must never be sent to a suggestion provider.
+        if (state.flags.keyVariation == KeyVariation.PASSWORD || state.editor.info.isRawInputEditor) {
+            clearSuggestions()
+            return
+        }
         val reqTime = SystemClock.uptimeMillis()
+        val privateSession = state.flags.isIncognitoMode
         scope.launch {
             val emojiSuggestions = when {
                 prefs.emoji.suggestionEnabled.get() -> {
@@ -201,7 +227,7 @@ class NlpManager(context: Context) {
                         content = content,
                         maxCandidateCount = prefs.emoji.suggestionCandidateMaxCount.get(),
                         allowPossiblyOffensive = !prefs.suggestion.blockPossiblyOffensive.get(),
-                        isPrivateSession = false // TODO keyboardManager.activeState.isIncognitoMode,
+                        isPrivateSession = privateSession,
                     )
                 }
                 else -> emptyList()
@@ -210,13 +236,14 @@ class NlpManager(context: Context) {
                 emojiSuggestions.isNotEmpty() && prefs.emoji.suggestionType.get().prefix.isNotEmpty() -> {
                     emptyList()
                 }
+                !prefs.suggestion.enabled.get() -> emptyList()
                 else -> {
                     getSuggestionProvider(subtype).suggest(
                         subtype = subtype,
                         content = content,
                         maxCandidateCount = 8,
                         allowPossiblyOffensive = !prefs.suggestion.blockPossiblyOffensive.get(),
-                        isPrivateSession = false // TODO keyboardManager.activeState.isIncognitoMode,
+                        isPrivateSession = privateSession,
                     )
                 }
             }

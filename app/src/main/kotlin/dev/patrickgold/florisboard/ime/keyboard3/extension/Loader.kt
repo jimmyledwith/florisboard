@@ -35,6 +35,12 @@ import org.k3lp.model.compileToModel
 
 private val SCOPE_FOUNDATION = K3Descriptor("fl", "ext", "org.florisboard.k3.foundation")
 
+/**
+ * Keyboard loaded on every start. Subtypes are not wired to keyboard3 yet, so this asset is the
+ * fresh-install layout: English (US), QWERTY.
+ */
+internal const val DefaultFoundationKeyboardAsset = "keyboard/qwerty.xml"
+
 // TODO this is just a placeholder testing code, must be replaced by proper logic & extension-aware logic
 @OptIn(WillRequireMigrationToRichErrors::class)
 suspend fun loadFoundationKeyboard(imeController: ImeController, storage: Storage) {
@@ -58,7 +64,7 @@ suspend fun loadFoundationKeyboard(imeController: ImeController, storage: Storag
         displays = listOf("flex://org.florisboard.k3.foundation/displays-implied.xml"),
         keys = listOf("flex://org.florisboard.k3.foundation/keys-implied.xml"),
     )
-    val file = loadAssetFile("keyboard/qwertz.xml")
+    val file = loadAssetFile(DefaultFoundationKeyboardAsset)
     val result = file.compileToModel(importResolver, impliedImports)
     for (report in result.reports) {
         flogError { report.cause?.stackTraceToString() ?: "" }

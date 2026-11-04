@@ -155,7 +155,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
     inner class Correction {
         val autoSpacePunctuation = boolean(
             key = "correction__auto_space_punctuation",
-            default = false,
+            default = true,
         )
         val doubleSpacePeriod = boolean(
             key = "correction__double_space_period",
@@ -481,7 +481,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
             default = InteractionTimingOptions.Default.longPressTimeout.inWholeMilliseconds.toInt(),
         )
         val longPressKeyHintEnabled = boolean(
-            key = "keyboard__long_press_key_hint_enabled",
+            key = "keyboard__long_press_key_hint_enabled_v2",
             default = TouchModelOptions.Default.longPressKeyHintEnabled,
         )
         val longPressKeyHintPlacement = enum(
@@ -627,7 +627,7 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val enabled = boolean(
             key = "suggestion__enabled",
-            default = false,
+            default = true,
         )
         val displayMode = enum(
             key = "suggestion__display_mode",
@@ -751,6 +751,12 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
             }
             "suggestion__clipboard_content_timeout" -> {
                 entry.transform(key = "clipboard__suggestion_timeout")
+            }
+
+            // Drop the old default-on corner labels. The new key defaults to off.
+            // Keep until installs that saved the v1 key are gone.
+            "keyboard__long_press_key_hint_enabled" -> {
+                entry.reset()
             }
 
             //Migrate one hand mode prefs keep until: 0.7 dev cycle

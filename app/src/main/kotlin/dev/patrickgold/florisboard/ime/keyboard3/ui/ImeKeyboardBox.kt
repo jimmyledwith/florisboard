@@ -109,8 +109,8 @@ fun ImeKeyboardBox(
         when (spaceBarMode) {
             SpaceBarMode.NOTHING -> K3String.Empty
             SpaceBarMode.CURRENT_LANGUAGE -> {
-                // TODO this might not be the right locale, get from new suntypes once impl
-                val locale = FlorisLocale.from(model.locales.getOrElse(0) { "en" })
+                // TODO get this from the active subtype once keyboard3 selects a layout per language
+                val locale = FlorisLocale.fromTag(model.locales.getOrElse(0) { "en-US" })
                 when (displayLanguageNamesIn) {
                     DisplayLanguageNamesIn.SYSTEM_LOCALE -> locale.displayName()
                     DisplayLanguageNamesIn.NATIVE_LOCALE -> locale.displayName(locale)

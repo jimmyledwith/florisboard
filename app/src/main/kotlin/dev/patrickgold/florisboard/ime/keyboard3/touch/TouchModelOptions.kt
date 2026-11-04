@@ -34,7 +34,7 @@ data class TouchModelOptions(
             showNumberRow = false,
             fnKeyEnabled = true,
             fnKeyArrangement = FnKeyArrangement.Default,
-            longPressKeyHintEnabled = true,
+            longPressKeyHintEnabled = false,
             longPressKeyHintPlacement = LongPressKeyHintPlacement.TOP_END,
             multiTapHighlightEnabled = true,
             flickKeyHintEnabled = false,
